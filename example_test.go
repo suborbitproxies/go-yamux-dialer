@@ -3,6 +3,7 @@ package yamuxdialer_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -121,6 +122,62 @@ func ExampleWithProxyBasicAuth() {
 	defer resp.Body.Close()
 
 	fmt.Printf("Status: %s\n", resp.Status)
+}
+
+func ExampleWithProxyBasicAuth_differentSessions() {
+	// One dialer ⇒ one TCP connection and one yamux session. Multiple HTTP requests
+	// each get a fresh yamux stream; WithProxyBasicAuth sets distinct proxy users
+	// per CONNECT without creating a second dialer.
+
+	const (
+		targetURL   = "https://example.com/"
+		userPrefix  = "my-pool-user"
+		pass        = "your-proxy-password"
+		numRequests = 50
+	)
+
+	config := &yamuxdialer.Config{
+		ProxyAddress: "proxy.example.com:443",
+	}
+	dialer, err := yamuxdialer.New(config)
+	if err != nil {
+		panic(err)
+	}
+	defer dialer.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext:       dialer.DialContext,
+			DisableKeepAlives: true,
+		},
+		Timeout: 30 * time.Second,
+	}
+
+	for i := 1; i <= numRequests; i++ {
+		user := fmt.Sprintf("%s_session-%d", userPrefix, i)
+		ctx := yamuxdialer.WithProxyBasicAuth(context.Background(), user, pass)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if err != nil {
+			fmt.Printf("[%02d] request: %v\n", i, err)
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Printf("[%02d] %s: %v\n", i, user, err)
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			fmt.Printf("[%02d] body: %v\n", i, err)
+			continue
+		}
+		sample := string(body)
+		if len(sample) > 80 {
+			sample = sample[:80] + "…"
+		}
+		fmt.Printf("[%02d] user=%s status=%s excerpt=%s\n", i, user, resp.Status, sample)
+	}
 }
 
 func ExampleDialer_DialContext() {
